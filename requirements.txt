@@ -1,0 +1,3 @@
+nodriver
+python-dotenv
+requests
