@@ -1,0 +1,50 @@
+2026-05-29 20:30:56 | INFO | Starting stealth profile creation | provider=multilogin country=US
+2026-05-29 20:30:56 | INFO | Step A: generating identity for country=US
+2026-05-29 20:30:56 | INFO | Identity generated | tz=America/New_York lang=en-US screen=1440x900
+2026-05-29 20:30:56 | INFO | Proxy configured | host=us.smartproxy.net port=3120 type=http
+2026-05-29 20:30:56 | INFO | Step B: creating profile via multilogin API
+2026-05-29 20:30:57 | ERROR | Provider error during profile creation: Multilogin create response missing profile_id: {'status': {'error_code': '', 'http_code': 201, 'message': 'Profile successfully created'}, 'data': {'ids': ['cbff2c50-e384-42cd-a29d-a476f2b9affa']}}
+2026-05-29 20:31:25 | INFO | Starting stealth profile creation | provider=multilogin country=US
+2026-05-29 20:31:25 | INFO | Step A: generating identity for country=US
+2026-05-29 20:31:25 | INFO | Identity generated | tz=America/New_York lang=en-US screen=2560x1440
+2026-05-29 20:31:25 | INFO | Proxy configured | host=us.smartproxy.net port=3120 type=http
+2026-05-29 20:31:25 | INFO | Step B: creating profile via multilogin API
+2026-05-29 20:31:26 | INFO | Profile created | profile_id=f7f9c878-db20-45bd-85d8-4365cddf7b89
+2026-05-29 20:31:26 | INFO | Step C: identity settings applied at creation | seeds=canvas:04876f0f webgl:e450a942 audio:866bfd9b
+2026-05-29 20:31:26 | INFO | Step D: complete | profile_id=f7f9c878-db20-45bd-85d8-4365cddf7b89 provider=multilogin country=US
+2026-05-29 20:34:59 | INFO | Starting stealth profile creation | provider=multilogin country=US
+2026-05-29 20:34:59 | INFO | Step A: generating identity for country=US
+2026-05-29 20:34:59 | INFO | Identity generated | tz=America/New_York lang=en-US screen=1440x900
+2026-05-29 20:34:59 | INFO | Generating Multilogin built-in proxy for country=US
+2026-05-29 20:35:00 | ERROR | Provider error during profile creation: Multilogin proxy HTTP error 501: <!DOCTYPE HTML>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <title>Error response</title>
+    </head>
+    <body>
+        <h1>Error response</h1>
+        <p>Error code: 501</p>
+        <p>Message: Unsupported method ('POST').</p>
+        <p>Error code explanation: 501 - Server does not support this operation.</p>
+    </body>
+</html>
+
+2026-05-29 20:35:36 | INFO | Starting stealth profile creation | provider=multilogin country=US
+2026-05-29 20:35:36 | INFO | Step A: generating identity for country=US
+2026-05-29 20:35:36 | INFO | Identity generated | tz=America/New_York lang=en-US screen=2560x1440
+2026-05-29 20:35:36 | INFO | Generating Multilogin built-in proxy for country=US
+2026-05-29 20:35:37 | INFO | Proxy configured | source=multilogin host=gate.multilogin.com port=8080 type=http
+2026-05-29 20:35:37 | INFO | Step B: creating profile via multilogin API | name=MMB
+2026-05-29 20:35:38 | INFO | Profile created | profile_id=c58a40dc-d6ff-4234-8d26-a592804d32ea
+2026-05-29 20:35:38 | INFO | Step C: identity settings applied at creation | seeds=canvas:4de64d52 webgl:30447a63 audio:bd14e1ed
+2026-05-29 20:35:38 | INFO | Step D: complete | profile_id=c58a40dc-d6ff-4234-8d26-a592804d32ea provider=multilogin country=US
+2026-05-29 20:50:13 | INFO | Starting stealth profile creation | provider=multilogin country=US
+2026-05-29 20:50:13 | INFO | Generating Multilogin built-in proxy for country=US
+2026-05-29 20:50:15 | INFO | Proxy configured | source=multilogin host=gate.multilogin.com port=8080 type=http
+2026-05-29 20:50:18 | INFO | Proxy exit IP detected | ip=24.0.159.134 city=None country=None
+2026-05-29 20:50:19 | INFO | Step A: identity synced | ip=24.0.159.134 tz=America/New_York city=Jersey City source=geoip screen=1440x900
+2026-05-29 20:50:19 | INFO | Step B: creating profile via multilogin API | name=MMB
+2026-05-29 20:50:19 | INFO | Profile created | profile_id=1a10794e-95ee-4930-b146-27f142fb91c9
+2026-05-29 20:50:19 | INFO | Step C: identity settings applied at creation | seeds=canvas:8dedc047 webgl:e2f7a37f audio:4e79cd3c
+2026-05-29 20:50:19 | INFO | Step D: complete | profile_id=1a10794e-95ee-4930-b146-27f142fb91c9 provider=multilogin ip=24.0.159.134 tz=America/New_York
