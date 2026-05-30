@@ -13,6 +13,7 @@ import random
 import re
 import secrets
 import string
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +30,7 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import HTTPError, RequestException, Timeout
 
 from providers.BrowserManager import BrowserManager, BrowserProviderError
+from core.ProfileFactory import ProfileFactory, ProfileFactoryError
 from services.IdentityManager import IdentityManager
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -39,6 +41,50 @@ PROFILE_DATA_DIR = PROJECT_ROOT / "data" / "profiles"
 GMAIL_SIGNUP_URL = (
     "https://accounts.google.com/signup/v2/createaccount"
     "?flowName=GlifWebSignIn&flowEntry=SignUp"
+)
+
+GMAIL_MOBILE_SIGNUP_URL = (
+    "https://accounts.google.com/signup/v2/webcreateaccount"
+    "?flowName=GlifWebSignIn&flowEntry=SignUp"
+)
+
+MOBILE_WARMUP_SITES: tuple[str, ...] = (
+    "https://m.amazon.com",
+    "https://en.m.wikipedia.org/wiki/Main_Page",
+    "https://www.bbc.com/news",
+    "https://m.youtube.com",
+    "https://www.reddit.com",
+    "https://m.ebay.com",
+    "https://www.cnn.com",
+    "https://www.espn.com",
+    "https://www.imdb.com",
+    "https://www.pinterest.com",
+    "https://www.weather.com",
+    "https://www.nytimes.com",
+    "https://www.walmart.com",
+    "https://www.target.com",
+)
+
+WARMUP_MIN_SECONDS = 300
+WARMUP_MAX_SECONDS = 600
+
+DEVICE_VERIFICATION_MESSAGES: tuple[str, ...] = (
+    "Verify some info before creating an account",
+    "Verify some info",
+)
+
+ERROR_DEVICE_VERIFICATION = PROJECT_ROOT / "logs" / "error_device_verification.png"
+
+MOBILE_FIRST_NAME_CSS: tuple[str, ...] = (
+    'input[name="firstName"]',
+    'input[autocomplete="given-name"]',
+    'input[aria-label="First name"]',
+)
+
+MOBILE_LAST_NAME_CSS: tuple[str, ...] = (
+    'input[name="lastName"]',
+    'input[autocomplete="family-name"]',
+    'input[aria-label="Last name"]',
 )
 
 WARMUP_SITES: tuple[str, ...] = (
@@ -148,6 +194,24 @@ ERROR_NEXT_SCREENSHOT = PROJECT_ROOT / "logs" / "error_next_button.png"
 ERROR_PAGE_HTML = PROJECT_ROOT / "logs" / "error_page.html"
 ERROR_BIRTHDAY_SCREENSHOT = PROJECT_ROOT / "logs" / "error_birthday_gender.png"
 ERROR_PASSWORD_SCREENSHOT = PROJECT_ROOT / "logs" / "error_password.png"
+ERROR_SOMETHING_WRONG_SCREENSHOT = PROJECT_ROOT / "logs" / "error_something_went_wrong.png"
+
+GOOGLE_GENERIC_ERRORS: tuple[str, ...] = (
+    "Something went wrong",
+    "Please try again",
+)
+
+PASSWORD_TIMING_PROFILES: dict[str, tuple[float, float]] = {
+    "normal": (0.08, 0.16),
+    "slow": (0.12, 0.22),
+    "fast": (0.06, 0.11),
+    "erratic": (0.05, 0.20),
+}
+
+COMMON_PASSWORD_PATTERNS: tuple[str, ...] = (
+    "password", "123456", "qwerty", "abc123", "letmein", "welcome",
+    "monkey", "dragon", "master", "login", "admin", "passw0rd",
+)
 
 NEXT_BUTTON_CSS_SELECTORS: tuple[str, ...] = (
     "#accountDetailsNext",
@@ -193,6 +257,10 @@ class FiveSimError(AccountManagerError):
 
 class GmailSignupError(AccountManagerError):
     """Raised when Gmail signup flow fails."""
+
+
+class DeviceVerificationError(GmailSignupError):
+    """Raised when Google shows the device-trust verification wall."""
 
 
 # ---------------------------------------------------------------------------
@@ -249,15 +317,73 @@ class NameGenerator:
 
     @staticmethod
     def generate_password(length: int = 16) -> str:
-        alphabet = string.ascii_letters + string.digits + "!@#$%"
-        while True:
-            password = "".join(secrets.choice(alphabet) for _ in range(length))
-            if (
+        return NameGenerator.generate_strong_human_password(length)
+
+    @staticmethod
+    def generate_strong_human_password(length: int | None = None) -> str:
+        """
+        Build a strong password that looks human-chosen rather than machine-random.
+
+        Uses word fragments, mixed case, digits, and symbols while avoiding
+        common dictionary patterns and repetitive sequences.
+        """
+        target_len = length or random.randint(14, 18)
+        word_pool = (
+            "River", "Cloud", "Stone", "Maple", "Fox", "Moon", "Kite", "Wave",
+            "Pixel", "Nova", "Cedar", "Spark", "Bloom", "Frost", "Ember",
+        )
+        symbols = "!@#$%&*?"
+        lower_fragments = ("lake", "tech", "run", "sky", "fox", "bay", "zen", "arc")
+
+        for _ in range(40):
+            w1 = random.choice(word_pool)
+            w2 = random.choice(word_pool)
+            while w2 == w1:
+                w2 = random.choice(word_pool)
+            frag = random.choice(lower_fragments)
+            num = random.randint(10, 9999)
+            sym = random.choice(symbols)
+            sym2 = random.choice(symbols) if random.random() < 0.4 else ""
+            tail = secrets.choice(string.ascii_lowercase + string.digits)
+
+            parts = random.sample(
+                [w1, sym, w2, str(num), frag.capitalize(), sym2, tail],
+                k=random.randint(5, 7),
+            )
+            password = "".join(parts)
+
+            if len(password) < target_len:
+                extra = "".join(
+                    secrets.choice(string.ascii_letters + string.digits + symbols)
+                    for _ in range(target_len - len(password))
+                )
+                insert_at = random.randint(1, max(1, len(password) - 1))
+                password = password[:insert_at] + extra + password[insert_at:]
+
+            password = password[:target_len]
+
+            lowered = password.lower()
+            if any(bad in lowered for bad in COMMON_PASSWORD_PATTERNS):
+                continue
+            if re.search(r"(.)\1{2,}", password):
+                continue
+            if re.search(r"(0123|1234|2345|abcd|qwer)", lowered):
+                continue
+            if not (
                 any(c.islower() for c in password)
                 and any(c.isupper() for c in password)
                 and any(c.isdigit() for c in password)
+                and any(c in symbols for c in password)
             ):
-                return password
+                continue
+            return password
+
+        fallback = (
+            f"{random.choice(word_pool)}{random.choice(symbols)}"
+            f"{random.randint(100, 9999)}{random.choice(lower_fragments).capitalize()}"
+            f"{secrets.choice(symbols)}"
+        )
+        return fallback[:target_len]
 
     @staticmethod
     def infer_gender(first_name: str) -> str:
@@ -455,6 +581,10 @@ class AccountManager:
             env_path=str(env_path or DEFAULT_ENV_PATH)
         )
         self._identity_manager = IdentityManager(env_path=env_path)
+        self._profile_factory = ProfileFactory(
+            env_path=env_path,
+            log_path=PROJECT_ROOT / "logs" / "factory.log",
+        )
         self._fivesim: Optional[FiveSimClient] = None
         self._fivesim_api_key = os.getenv("FIVESIM_API_KEY", "")
         self._logger = self._configure_logger(log_path or DEFAULT_LOG_PATH)
@@ -499,6 +629,267 @@ class AccountManager:
         for char in text:
             await element._tab.send(cdp.input_.dispatch_key_event("char", text=char))
             await asyncio.sleep(random.uniform(0.05, 0.2))
+
+    async def _human_type_password(
+        self,
+        element: Element,
+        text: str,
+        timing_profile: str = "normal",
+    ) -> None:
+        """Type a password with irregular per-key delays to avoid bot rhythm."""
+        await element.focus()
+        min_delay, max_delay = PASSWORD_TIMING_PROFILES.get(
+            timing_profile, PASSWORD_TIMING_PROFILES["normal"]
+        )
+
+        for index, char in enumerate(text):
+            await element._tab.send(cdp.input_.dispatch_key_event("char", text=char))
+
+            if random.random() < 0.07:
+                await asyncio.sleep(random.uniform(0.28, 0.62))
+            elif index > 0 and index % random.randint(4, 8) == 0:
+                await asyncio.sleep(random.uniform(0.14, 0.38))
+            else:
+                await asyncio.sleep(random.uniform(min_delay, max_delay))
+
+    async def _jitter_mouse_near_element(self, element: Element) -> None:
+        """Wiggle the cursor near an element before clicking, like a human hand."""
+        try:
+            position = await element.get_position()
+            if not position or not position.center:
+                return
+            cx, cy = position.center
+            for _ in range(random.randint(2, 5)):
+                offset_x = random.uniform(-28.0, 28.0)
+                offset_y = random.uniform(-18.0, 18.0)
+                await element.tab.mouse_move(
+                    cx + offset_x,
+                    cy + offset_y,
+                    steps=random.randint(3, 9),
+                )
+                await asyncio.sleep(random.uniform(0.04, 0.14))
+
+            settle_x = cx + random.uniform(-5.0, 5.0)
+            settle_y = cy + random.uniform(-4.0, 4.0)
+            await element.tab.mouse_move(
+                settle_x, settle_y, steps=random.randint(6, 14)
+            )
+            await asyncio.sleep(random.uniform(0.08, 0.22))
+        except Exception as exc:
+            self._logger.debug("Mouse jitter skipped: %s", exc)
+
+    async def _thinking_pause(self, minimum: float = 2.0, maximum: float = 6.0) -> None:
+        """Simulate a human re-reading the form before submitting."""
+        delay = random.uniform(minimum, maximum)
+        self._logger.info("Thinking pause before submit | %.2fs", delay)
+        await asyncio.sleep(delay)
+
+    async def _has_google_generic_error(self, tab: Tab) -> bool:
+        for message in GOOGLE_GENERIC_ERRORS:
+            if await self._is_text_visible_on_page(tab, message):
+                return True
+        return False
+
+    async def _locate_next_button(self, tab: Tab) -> tuple[Element | None, str]:
+        css_and_xpath = [
+            ("css", selector) for selector in NEXT_BUTTON_CSS_SELECTORS
+        ] + [("xpath", xpath) for xpath in NEXT_BUTTON_XPATH_SELECTORS]
+        text_strategies = [("text", label) for label in NEXT_BUTTON_TEXT_LABELS]
+
+        for kind, value in css_and_xpath + text_strategies:
+            try:
+                element: Element | None = None
+                if kind == "css":
+                    element = await tab.select(value, timeout=2)
+                elif kind == "xpath":
+                    for item in await self._safe_xpath(tab, value, timeout=2):
+                        element = item
+                        break
+                elif kind == "text":
+                    element = await tab.find(value, best_match=True, timeout=2)
+
+                if element and await self._wait_for_clickable(element, timeout=4.0):
+                    return element, f"{kind}:{value}"
+            except Exception:
+                continue
+        return None, ""
+
+    async def _click_next_with_jitter(self, tab: Tab) -> None:
+        """Click Next after mouse jitter near the button coordinates."""
+        self._logger.info("Attempting human-like Next click (jitter + pause)")
+        await asyncio.sleep(random.uniform(0.3, 0.9))
+
+        element, strategy = await self._locate_next_button(tab)
+        if element:
+            await self._jitter_mouse_near_element(element)
+            await self._human_click_element(element)
+            self._logger.info("Clicked Next via %s with jitter", strategy)
+            return
+
+        await self._click_next(tab)
+
+    async def _advanced_past_password_step(self, tab: Tab) -> bool:
+        phone_hints = ('input[type="tel"]', 'input[name="phoneNumberId"]')
+        for selector in phone_hints:
+            try:
+                if await tab.query_selector(selector):
+                    return True
+            except Exception:
+                continue
+        if await self._has_google_generic_error(tab):
+            return False
+        return not await self._is_on_password_step(tab)
+
+    async def _recover_from_password_failure(self, tab: Tab, attempt: int) -> None:
+        """Screenshot the error, then refresh or navigate back before retry."""
+        screenshot = ERROR_SOMETHING_WRONG_SCREENSHOT.with_name(
+            f"error_something_went_wrong_attempt{attempt}.png"
+        )
+        await self._capture_debug_artifacts(tab, screenshot, f"google_error_{attempt}")
+        self._logger.warning(
+            "Google error detected on password step | attempt=%s recovering", attempt
+        )
+
+        if attempt % 2 == 1:
+            await tab.reload()
+            self._logger.info("Recovery: page reload")
+        else:
+            await tab.back()
+            self._logger.info("Recovery: browser back one step")
+            await self._human_delay(2.0, 4.0)
+            if not await self._is_on_password_step(tab):
+                await self._click_next(tab)
+                await self._human_delay(2.0, 4.0)
+
+        await self._human_delay(3.0, 6.0)
+
+    async def _fill_password_field_human(
+        self,
+        tab: Tab,
+        password: str,
+        css_selectors: tuple[str, ...],
+        xpath_selectors: tuple[str, ...],
+        labels: tuple[str, ...],
+        field_name: str,
+        timing_profile: str,
+    ) -> None:
+        element = await self._find_element_by_strategies(
+            tab, css_selectors, xpath_selectors, labels
+        )
+        if not element:
+            await self._fill_input_by_label(tab, labels, password)
+            return
+
+        await self._human_click_element(element)
+        try:
+            await element.clear_input()
+        except Exception:
+            pass
+        await asyncio.sleep(random.uniform(0.15, 0.45))
+        await self._human_type_password(element, password, timing_profile)
+        self._logger.info(
+            "Filled %s with human typing | profile=%s", field_name, timing_profile
+        )
+
+    async def _fill_password_fields_human(
+        self,
+        tab: Tab,
+        password: str,
+        timing_profile: str = "normal",
+    ) -> None:
+        """Fill password fields using variable typing speed and human pauses."""
+        if not await self._is_on_password_step(tab):
+            await self._human_delay(1.0, 2.5)
+
+        self._logger.info(
+            "Filling password fields (human mode) | profile=%s", timing_profile
+        )
+
+        await self._fill_password_field_human(
+            tab,
+            password,
+            PASSWORD_INPUT_CSS,
+            PASSWORD_INPUT_XPATH,
+            ("Password", "password"),
+            "Password",
+            timing_profile,
+        )
+        await self._human_delay(random.uniform(0.8, 2.0), random.uniform(2.0, 3.5))
+
+        confirm = await self._find_element_by_strategies(
+            tab, CONFIRM_PASSWORD_CSS, CONFIRM_PASSWORD_XPATH
+        )
+        if confirm:
+            confirm_profile = random.choice(
+                [timing_profile, random.choice(list(PASSWORD_TIMING_PROFILES))]
+            )
+            await self._fill_password_field_human(
+                tab,
+                password,
+                CONFIRM_PASSWORD_CSS,
+                CONFIRM_PASSWORD_XPATH,
+                ("Confirm", "confirm password"),
+                "Confirm password",
+                confirm_profile,
+            )
+
+    async def _submit_password_step_human(
+        self,
+        tab: Tab,
+        password: str,
+        timing_profile: str,
+    ) -> None:
+        """Fill password, pause to 'think', jitter near Next, then submit."""
+        await self._fill_password_fields_human(tab, password, timing_profile)
+        await self._thinking_pause(2.0, 6.0)
+        await self._click_next_with_jitter(tab)
+        await self._human_delay(2.0, 4.5)
+
+    async def _complete_password_step_with_retries(
+        self,
+        tab: Tab,
+        max_attempts: int = 3,
+    ) -> str:
+        """
+        Submit the password step with human-like timing and retry on Google errors.
+
+        Returns:
+            The password that successfully advanced the flow.
+        """
+        profiles = list(PASSWORD_TIMING_PROFILES.keys())
+        last_password = ""
+
+        for attempt in range(1, max_attempts + 1):
+            password = NameGenerator.generate_strong_human_password()
+            timing_profile = random.choice(profiles)
+            last_password = password
+
+            self._logger.info(
+                "Password attempt %s/%s | profile=%s len=%s",
+                attempt,
+                max_attempts,
+                timing_profile,
+                len(password),
+            )
+
+            await self._submit_password_step_human(tab, password, timing_profile)
+
+            if await self._advanced_past_password_step(tab):
+                self._logger.info("Password step passed on attempt %s", attempt)
+                return password
+
+            if await self._has_google_generic_error(tab) or await self._is_on_password_step(tab):
+                if attempt < max_attempts:
+                    await self._recover_from_password_failure(tab, attempt)
+                    continue
+                await self._capture_debug_artifacts(
+                    tab, ERROR_PASSWORD_SCREENSHOT, "password_exhausted"
+                )
+                raise GmailSignupError(
+                    "Password step failed after retries (Google error or stuck on page)."
+                )
+
+        return last_password
 
     async def _is_element_clickable(self, element: Element) -> bool:
         """Return True when the element is visible, enabled, and hit-testable."""
@@ -1210,42 +1601,153 @@ class AccountManager:
                 "Still on password step after clicking Next."
             )
 
-    async def warmup_browser(self, tab: Tab) -> None:
-        """
-        Visit 2-3 high-authority sites with human-like browsing behavior.
+    async def _has_device_verification_wall(self, tab: Tab) -> bool:
+        for message in DEVICE_VERIFICATION_MESSAGES:
+            if await self._is_text_visible_on_page(tab, message):
+                return True
+        return False
 
-        Performs random scrolling, pauses, and optional link clicks before
-        navigating to Gmail signup.
-        """
-        sites = random.sample(WARMUP_SITES, k=random.randint(2, 3))
-        self._logger.info("Warm-up started | sites=%s", sites)
+    async def _guard_device_verification(self, tab: Tab, step: str) -> None:
+        if await self._has_device_verification_wall(tab):
+            screenshot = ERROR_DEVICE_VERIFICATION.with_name(
+                f"error_device_verification_{step}.png"
+            )
+            await self._capture_debug_artifacts(tab, screenshot, f"device_verify_{step}")
+            raise DeviceVerificationError(
+                f"Google device verification wall at step: {step}"
+            )
 
-        for url in sites:
-            self._logger.info("Warm-up visiting %s", url)
+    async def _configure_mobile_tab(self, tab: Tab, identity: dict[str, Any]) -> None:
+        """Apply mobile viewport and UA overrides for consistent mobile rendering."""
+        if not identity.get("mobile_first"):
+            return
+        try:
+            width = int(identity.get("screen_width") or 390)
+            height = int(identity.get("screen_height") or 844)
+            ratio = float(identity.get("pixel_ratio") or 2.75)
+            await tab.send(
+                cdp.emulation.set_device_metrics_override(
+                    width=width,
+                    height=height,
+                    device_scale_factor=ratio,
+                    mobile=True,
+                )
+            )
+            if identity.get("user_agent"):
+                await tab.send(
+                    cdp.emulation.set_user_agent_override(
+                        user_agent=str(identity["user_agent"]),
+                        platform=str(
+                            identity.get("navigator_platform") or "Linux armv8l"
+                        ),
+                        mobile=True,
+                    )
+                )
+            self._logger.info(
+                "Mobile tab configured | %sx%s dpr=%s platform=%s",
+                width,
+                height,
+                ratio,
+                identity.get("device_platform"),
+            )
+        except Exception as exc:
+            self._logger.debug("Mobile tab emulation skipped: %s", exc)
+
+    async def warmup_browser(
+        self,
+        tab: Tab,
+        *,
+        mobile_first: bool = True,
+    ) -> None:
+        """
+        Intensive mobile warm-up: 5-10 minutes across 10+ high-authority sites.
+
+        Builds browsing trust before Gmail signup using scrolls, pauses, and
+        occasional link clicks with human-like timing.
+        """
+        sites = list(MOBILE_WARMUP_SITES if mobile_first else WARMUP_SITES)
+        random.shuffle(sites)
+        min_sites = 10 if mobile_first else 2
+        visit_count = min(len(sites), max(min_sites, random.randint(min_sites, len(sites))))
+
+        if mobile_first:
+            target_seconds = random.uniform(WARMUP_MIN_SECONDS, WARMUP_MAX_SECONDS)
+        else:
+            target_seconds = random.uniform(60, 180)
+
+        self._logger.info(
+            "Warm-up started | mobile=%s target=%.0fs sites=%s",
+            mobile_first,
+            target_seconds,
+            visit_count,
+        )
+
+        started = time.monotonic()
+        for index, url in enumerate(sites[:visit_count], start=1):
+            elapsed = time.monotonic() - started
+            if elapsed >= target_seconds:
+                break
+
+            self._logger.info("Warm-up [%s/%s] visiting %s", index, visit_count, url)
             await tab.get(url)
-            await self._human_delay(2, 5)
+            await self._human_delay(3, 8)
 
-            scrolls = random.randint(2, 4)
+            scrolls = random.randint(3, 7)
             for _ in range(scrolls):
                 if random.choice((True, False)):
-                    await tab.scroll_down(random.randint(8, 20))
+                    await tab.scroll_down(random.randint(6, 24))
                 else:
-                    await tab.scroll_up(random.randint(5, 15))
-                await self._human_delay(1, 3)
+                    await tab.scroll_up(random.randint(4, 16))
+                await self._human_delay(1.5, 4.5)
 
-            if random.random() < 0.7:
+            if random.random() < 0.65:
                 try:
                     links = await tab.select_all('a[href^="http"]')
-                    candidates = links[: min(15, len(links))]
+                    candidates = links[: min(20, len(links))]
                     if candidates:
                         link = random.choice(candidates)
-                        self._logger.info("Warm-up clicking random link on %s", url)
+                        self._logger.info("Warm-up clicking link on %s", url)
                         await self._click_element(link)
-                        await self._human_delay(2, 4)
+                        await self._human_delay(2, 5)
+                        await tab.back()
+                        await self._human_delay(1, 3)
                 except Exception as exc:
                     self._logger.debug("Warm-up link click skipped: %s", exc)
 
-        self._logger.info("Warm-up complete")
+            remaining = target_seconds - (time.monotonic() - started)
+            if remaining > 5 and index < visit_count:
+                await asyncio.sleep(min(random.uniform(8, 20), remaining))
+
+        self._logger.info(
+            "Warm-up complete | elapsed=%.0fs", time.monotonic() - started
+        )
+
+    async def _fill_mobile_name_fields(
+        self,
+        tab: Tab,
+        first: str,
+        last: str,
+    ) -> None:
+        """Fill first/last name using mobile-friendly selectors."""
+        first_el = await self._find_element_by_strategies(
+            tab, MOBILE_FIRST_NAME_CSS, text_labels=("First name", "first name")
+        )
+        if first_el:
+            await self._human_click_element(first_el)
+            await self._human_type(first_el, first)
+        else:
+            await self._fill_input_by_label(tab, ("First name", "first name"), first)
+
+        await self._human_delay(0.5, 1.5)
+
+        last_el = await self._find_element_by_strategies(
+            tab, MOBILE_LAST_NAME_CSS, text_labels=("Last name", "last name")
+        )
+        if last_el:
+            await self._human_click_element(last_el)
+            await self._human_type(last_el, last)
+        else:
+            await self._fill_input_by_label(tab, ("Last name", "last name"), last)
 
     async def handle_sms_verification(
         self,
@@ -1276,6 +1778,10 @@ class AccountManager:
         except Exception as exc:
             self.fivesim.cancel_order(order.order_id)
             raise GmailSignupError("Phone number input not found on Gmail page.") from exc
+
+        if not phone_input:
+            self.fivesim.cancel_order(order.order_id)
+            raise GmailSignupError("Phone number input not found on Gmail page.")
 
         await self._human_type(phone_input, phone_digits)
         await self._human_delay(1, 2)
@@ -1349,57 +1855,48 @@ class AccountManager:
         )
         return cookies_path, metadata_path
 
-    async def create_gmail_account(
+    async def _run_signup_pipeline(
         self,
         profile_id: str,
-        country_code: str = "US",
+        country_code: str,
+        identity: dict[str, Any],
+        *,
+        mobile_first: bool = True,
     ) -> GmailAccountResult:
-        """
-        Full Gmail creation pipeline for an existing anti-detect profile.
-
-        Args:
-            profile_id: MoreLogin/Multilogin profile identifier.
-            country_code: ISO country for SMS number purchase.
-
-        Returns:
-            ``GmailAccountResult`` with credentials and saved session paths.
-        """
-        self._logger.info(
-            "Gmail creation started | profile=%s country=%s",
-            profile_id,
-            country_code,
-        )
-
-        identity = self._identity_manager.generate_identity(country_code=country_code)
-        self._logger.info(
-            "Identity context | tz=%s lang=%s", identity["timezone"], identity["language"]
-        )
-
+        """Execute Gmail signup inside an already-created mobile profile."""
         browser: Optional[Browser] = None
         try:
             browser = await self._browser_manager.get_browser_instance(profile_id)
             tab = browser.main_tab
 
-            await self.warmup_browser(tab)
+            await self._configure_mobile_tab(tab, identity)
+            await self.warmup_browser(tab, mobile_first=mobile_first)
             await self._human_delay(2, 4)
 
-            self._logger.info("Navigating to Gmail signup")
-            await tab.get(GMAIL_SIGNUP_URL)
+            signup_url = GMAIL_MOBILE_SIGNUP_URL if mobile_first else GMAIL_SIGNUP_URL
+            self._logger.info("Navigating to Gmail signup | mobile=%s", mobile_first)
+            await tab.get(signup_url)
             await self._human_delay(3, 6)
+            await self._guard_device_verification(tab, "signup_load")
 
             name = NameGenerator.generate()
-            password = NameGenerator.generate_password()
             username = NameGenerator.suggest_username(name.first, name.last)
             persona_gender = NameGenerator.infer_gender(name.first)
+            password = ""
 
             self._logger.info("Entering name | %s", name.full)
-            await self._fill_input_by_label(tab, ("First name", "first name"), name.first)
-            await self._human_delay(0.5, 1.5)
-            await self._fill_input_by_label(tab, ("Last name", "last name"), name.last)
+            if mobile_first:
+                await self._fill_mobile_name_fields(tab, name.first, name.last)
+            else:
+                await self._fill_input_by_label(tab, ("First name", "first name"), name.first)
+                await self._human_delay(0.5, 1.5)
+                await self._fill_input_by_label(tab, ("Last name", "last name"), name.last)
             await self._human_delay(1, 2)
             await self._click_next_after_name(tab)
+            await self._guard_device_verification(tab, "after_name")
 
             await self._fill_birthday_and_gender(tab, persona_gender)
+            await self._guard_device_verification(tab, "after_birthday")
 
             self._logger.info("Creating Gmail address | username=%s", username)
             try:
@@ -1418,14 +1915,15 @@ class AccountManager:
             await self._human_delay(1, 2)
             await self._click_next(tab)
             await self._human_delay(2, 4)
+            await self._guard_device_verification(tab, "after_username")
 
             if not await self._is_on_password_step(tab):
                 await self._human_delay(1.0, 2.0)
 
-            self._logger.info("Setting account password")
-            await self._fill_password_fields(tab, password)
-            await self._click_next_after_password(tab)
+            self._logger.info("Setting account password (human-like flow)")
+            password = await self._complete_password_step_with_retries(tab)
             await self._human_delay(2, 5)
+            await self._guard_device_verification(tab, "after_password")
 
             phone, _otp = await self.handle_sms_verification(tab, country_code)
             await self._human_delay(3, 6)
@@ -1460,6 +1958,8 @@ class AccountManager:
                 "country_code": country_code.upper(),
                 "timezone": identity["timezone"],
                 "language": identity["language"],
+                "device_platform": identity.get("device_platform"),
+                "mobile_first": mobile_first,
             }
 
             cookies_path, metadata_path = await self.save_session_cookies(
@@ -1483,15 +1983,106 @@ class AccountManager:
             self._logger.info("Gmail creation complete | email=%s", email)
             return result
 
-        except (BrowserProviderError, FiveSimError, GmailSignupError) as exc:
-            self._logger.error("Gmail creation failed: %s", exc)
-            raise AccountManagerError(str(exc)) from exc
-        except Exception as exc:
-            self._logger.exception("Unexpected Gmail creation failure")
-            raise AccountManagerError(f"Unexpected error: {exc}") from exc
         finally:
             if browser is not None:
                 browser.stop()
+
+    async def create_gmail_account(
+        self,
+        profile_id: Optional[str] = None,
+        country_code: str = "US",
+        *,
+        mobile_first: bool = True,
+        max_profile_recycles: int = 3,
+    ) -> GmailAccountResult:
+        """
+        Mobile-first Gmail creation with profile recycle on device verification.
+
+        Creates fresh Android/iOS profiles (with new proxy) when Google shows
+        the device-trust wall, up to ``max_profile_recycles`` attempts.
+        """
+        provider = self._browser_manager.provider_name
+        current_profile_id = profile_id
+        session_identity: dict[str, Any] = {}
+
+        self._logger.info(
+            "Gmail creation started | mobile_first=%s country=%s provider=%s",
+            mobile_first,
+            country_code,
+            provider,
+        )
+
+        for attempt in range(1, max_profile_recycles + 1):
+            try:
+                if current_profile_id is None or attempt > 1:
+                    profile_name = f"MMB-{secrets.token_hex(3)}"
+                    self._logger.info(
+                        "Creating fresh mobile profile | attempt=%s name=%s",
+                        attempt,
+                        profile_name,
+                    )
+                    created = self._profile_factory.create_stealth_profile(
+                        country_code=country_code,
+                        provider=provider,
+                        profile_name=profile_name,
+                        mobile_first=mobile_first,
+                    )
+                    current_profile_id = created["profile_id"]
+                    session_identity = created["identity"]
+                elif not session_identity:
+                    session_identity = self._identity_manager.generate_identity(
+                        country_code=country_code,
+                        profile_id=current_profile_id,
+                    )
+                    if mobile_first:
+                        session_identity = self._identity_manager.apply_mobile_fingerprint(
+                            session_identity,
+                            provider=provider,
+                        )
+
+                self._logger.info(
+                    "Signup attempt %s/%s | profile=%s platform=%s",
+                    attempt,
+                    max_profile_recycles,
+                    current_profile_id,
+                    session_identity.get("device_platform", "desktop"),
+                )
+
+                return await self._run_signup_pipeline(
+                    current_profile_id,
+                    country_code,
+                    session_identity,
+                    mobile_first=mobile_first,
+                )
+
+            except DeviceVerificationError as exc:
+                self._logger.warning(
+                    "Device verification wall — recycling profile | attempt=%s/%s: %s",
+                    attempt,
+                    max_profile_recycles,
+                    exc,
+                )
+                self._browser_manager.stop_profile(current_profile_id or "")
+                current_profile_id = None
+                session_identity = {}
+
+                if attempt >= max_profile_recycles:
+                    raise AccountManagerError(
+                        "Device verification persisted after profile recycles."
+                    ) from exc
+
+                await asyncio.sleep(random.uniform(8, 15))
+
+            except ProfileFactoryError as exc:
+                raise AccountManagerError(str(exc)) from exc
+            except (BrowserProviderError, FiveSimError, GmailSignupError) as exc:
+                self._logger.error("Gmail creation failed: %s", exc)
+                raise AccountManagerError(str(exc)) from exc
+            except Exception as exc:
+                self._logger.exception("Unexpected Gmail creation failure")
+                raise AccountManagerError(f"Unexpected error: {exc}") from exc
+
+        raise AccountManagerError("Gmail creation failed after all profile attempts.")
 
 
 if __name__ == "__main__":

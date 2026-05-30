@@ -1,0 +1,68 @@
+{
+  "provider": "multilogin",
+  "country_code": "US",
+  "windows": {
+    "profile_id": "c58a40dc-d6ff-4234-8d26-a592804d32ea",
+    "label": "MMB-Windows-Existing",
+    "identity": {
+      "audio_seed": "bd14e1ed45c4efd9a58f5075df9539ea",
+      "canvas_seed": "4de64d5232343124eb1985b9a890a12e",
+      "country_code": "US",
+      "language": "en-US",
+      "profile_id": "c58a40dc-d6ff-4234-8d26-a592804d32ea",
+      "screen_resolution": "1920x1080",
+      "timezone": "America/New_York",
+      "webgl_seed": "30447a632d432630d91bf018917c209c",
+      "os_type": "windows",
+      "mobile_first": false
+    }
+  },
+  "android": {
+    "profile_id": "1159bd18-0c08-4e4e-937b-8f8d8f52bc0f",
+    "label": "MMB-Android-Finance",
+    "identity": {
+      "country_code": "US",
+      "timezone": "America/New_York",
+      "language": "en-US",
+      "screen_resolution": "412x915",
+      "canvas_seed": "dad8136eb0deb6022138794507ec298d",
+      "webgl_seed": "8bd96b06a7c490b7456bb8443431c20d",
+      "audio_seed": "c648692749e897de8e88b9375c7ce9b2",
+      "ip_address": "69.42.134.106",
+      "city": "Hudson",
+      "region": "New York",
+      "timezone_source": "geoip",
+      "device_platform": "android",
+      "mobile_first": true,
+      "screen_width": 412,
+      "screen_height": 915,
+      "pixel_ratio": 2.0,
+      "operator_system_id": 3,
+      "os_type": "android",
+      "user_agent": "Mozilla/5.0 (Linux; Android 14; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+      "navigator_platform": "Linux armv8l",
+      "max_touch_points": 5,
+      "hardware_concurrency": 8,
+      "profile_id": "1159bd18-0c08-4e4e-937b-8f8d8f52bc0f"
+    }
+  },
+  "macos": {
+    "profile_id": "fe1a3ea6-a7bf-4dbb-9d9f-f1cb14abdc56",
+    "label": "MMB-macOS-Finance",
+    "identity": {
+      "country_code": "US",
+      "timezone": "America/New_York",
+      "language": "en-US",
+      "screen_resolution": "1440x900",
+      "canvas_seed": "caf6d2d8f83ff9127a82791087e3b5a0",
+      "webgl_seed": "345b7473c048fd88a1d373f88bc7ae66",
+      "audio_seed": "03e38f48bb336bbf26e6331fe7e50bed",
+      "timezone_source": "country",
+      "os_type": "macos",
+      "mobile_first": false,
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "navigator_platform": "MacIntel",
+      "profile_id": "fe1a3ea6-a7bf-4dbb-9d9f-f1cb14abdc56"
+    }
+  }
+}

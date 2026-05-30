@@ -7,10 +7,15 @@ then attaching nodriver to the returned Chrome DevTools Protocol (CDP) port.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
+import random
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, TypedDict
+from typing import Any, AsyncIterator, Optional, TypedDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
@@ -18,9 +23,213 @@ DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 import nodriver as uc
 import requests
 from dotenv import load_dotenv
+from nodriver import cdp
 from nodriver.core.browser import Browser
+from nodriver.core.tab import Tab
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import HTTPError, RequestException, Timeout
+
+# ---------------------------------------------------------------------------
+# Adaptive viewport
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ViewportProfile:
+    """Resolved OS viewport applied before first navigation."""
+
+    os_label: str
+    width: int
+    height: int
+    mobile: bool
+    device_scale_factor: float = 1.0
+
+
+ANDROID_VIEWPORTS: tuple[tuple[int, int, float], ...] = (
+    (390, 844, 3.0),
+    (360, 800, 2.0),
+    (412, 915, 2.625),
+)
+
+WINDOWS_VIEWPORTS: tuple[tuple[int, int], ...] = (
+    (1920, 1080),
+    (1366, 768),
+    (1536, 864),
+)
+
+MACOS_VIEWPORTS: tuple[tuple[int, int], ...] = (
+    (1440, 900),
+    (1680, 1050),
+    (1920, 1080),
+)
+
+
+def _is_mobile_identity(identity: dict[str, Any]) -> bool:
+    os_type = str(identity.get("os_type") or "").lower()
+    if os_type in {"windows", "macos", "mac", "darwin"} and not identity.get("mobile_first"):
+        return False
+    if identity.get("mobile_first"):
+        return True
+    if os_type in {"android", "ios"}:
+        return True
+    device = str(identity.get("device_platform") or "").lower()
+    if device in {"android", "ios"}:
+        return True
+    if identity.get("operator_system_id") in (3, 4):
+        return True
+    return False
+
+
+def _parse_screen_resolution(value: str) -> tuple[int, int] | None:
+    try:
+        width_str, height_str = str(value).lower().split("x", 1)
+        return int(width_str), int(height_str)
+    except (ValueError, AttributeError):
+        return None
+
+
+def resolve_viewport_profile(
+    identity: dict[str, Any],
+    rng: random.Random | None = None,
+) -> ViewportProfile:
+    """Map identity OS traits to a realistic viewport profile."""
+    picker = rng or random.Random()
+
+    if _is_mobile_identity(identity):
+        width = int(identity.get("screen_width") or 0)
+        height = int(identity.get("screen_height") or 0)
+        dpr = float(identity.get("pixel_ratio") or 0)
+
+        if width <= 0 or height <= 0:
+            width, height, dpr = picker.choice(ANDROID_VIEWPORTS)
+        elif dpr <= 0:
+            dpr = 2.75
+
+        return ViewportProfile(
+            os_label="Android",
+            width=width,
+            height=height,
+            mobile=True,
+            device_scale_factor=dpr,
+        )
+
+    os_type = str(identity.get("os_type") or "windows").lower()
+    parsed = _parse_screen_resolution(str(identity.get("screen_resolution") or ""))
+
+    if os_type in {"macos", "mac", "darwin", "ios"} and not identity.get("mobile_first"):
+        if parsed:
+            width, height = parsed
+        else:
+            width, height = picker.choice(MACOS_VIEWPORTS)
+        return ViewportProfile("macOS", width, height, mobile=False, device_scale_factor=1.0)
+
+    if parsed:
+        width, height = parsed
+    else:
+        width, height = picker.choice(WINDOWS_VIEWPORTS)
+    return ViewportProfile("Windows", width, height, mobile=False, device_scale_factor=1.0)
+
+
+async def apply_adaptive_viewport(
+    tab: Tab,
+    identity: dict[str, Any],
+    logger: logging.Logger | None = None,
+) -> ViewportProfile:
+    """
+    Strictly enforce OS-appropriate viewport via CDP before any navigation.
+
+    Sets device metrics (rendering viewport) and resizes the browser window
+    to match the chosen profile.
+    """
+    log = logger or logging.getLogger("mmb.browser_manager")
+    profile = resolve_viewport_profile(identity)
+
+    try:
+        await tab.send(cdp.emulation.clear_device_metrics_override())
+    except Exception:
+        pass
+
+    await tab.send(
+        cdp.emulation.set_device_metrics_override(
+            width=profile.width,
+            height=profile.height,
+            device_scale_factor=profile.device_scale_factor,
+            mobile=profile.mobile,
+            screen_width=profile.width,
+            screen_height=profile.height,
+        )
+    )
+
+    if identity.get("user_agent"):
+        await tab.send(
+            cdp.emulation.set_user_agent_override(
+                user_agent=str(identity["user_agent"]),
+                platform=str(
+                    identity.get("navigator_platform")
+                    or ("Linux armv8l" if profile.mobile else "Win32")
+                ),
+            )
+        )
+
+    chrome_margin_w = 0 if profile.mobile else 16
+    chrome_margin_h = 0 if profile.mobile else 96
+    try:
+        window_result = await tab.send(cdp.browser.get_window_for_target())
+        window_id = None
+        if isinstance(window_result, dict):
+            window_id = window_result.get("windowId") or window_result.get("window_id")
+        elif isinstance(window_result, (list, tuple)) and window_result:
+            window_id = window_result[0]
+        if window_id is not None:
+            await tab.send(
+                cdp.browser.set_window_bounds(
+                    window_id=window_id,
+                    bounds=cdp.browser.Bounds(
+                        width=profile.width + chrome_margin_w,
+                        height=profile.height + chrome_margin_h,
+                        window_state="normal",
+                    ),
+                )
+            )
+    except Exception as exc:
+        log.debug("Window bounds adjustment skipped: %s", exc)
+
+    log.info(
+        "Applied %s resolution: %sx%s",
+        profile.os_label,
+        profile.width,
+        profile.height,
+    )
+    return profile
+
+
+# ---------------------------------------------------------------------------
+# Profile lock — one active start/connect per profile_id
+# ---------------------------------------------------------------------------
+
+_profile_locks: dict[str, asyncio.Lock] = {}
+_lock_registry = asyncio.Lock()
+CDP_CONNECT_COOLDOWN_SECONDS = 5.0
+
+
+async def _get_profile_lock(profile_id: str) -> asyncio.Lock:
+    async with _lock_registry:
+        if profile_id not in _profile_locks:
+            _profile_locks[profile_id] = asyncio.Lock()
+        return _profile_locks[profile_id]
+
+
+@asynccontextmanager
+async def profile_session_lock(profile_id: str) -> AsyncIterator[None]:
+    """Prevent concurrent profile start/connect for the same profile_id."""
+    lock = await _get_profile_lock(profile_id.strip())
+    await lock.acquire()
+    try:
+        yield
+    finally:
+        if lock.locked():
+            lock.release()
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -181,10 +390,14 @@ class MoreLoginProvider(BaseBrowserProvider):
     ) -> str:
         """Create a MoreLogin profile via ``/api/env/create/advanced``."""
         name = profile_name or "MMB"
+        operator_system_id = int(
+            identity.get("operator_system_id")
+            or (3 if identity.get("mobile_first") else 1)
+        )
 
         payload: dict[str, Any] = {
             "browserTypeId": 1,
-            "operatorSystemId": 1,
+            "operatorSystemId": operator_system_id,
             "envName": name,
             "advancedSetting": {
                 "time_zone": {
@@ -205,6 +418,12 @@ class MoreLoginProvider(BaseBrowserProvider):
                 "audio_context": {"switcher": 1},
             },
         }
+
+        if identity.get("user_agent"):
+            payload["advancedSetting"]["ua"] = {
+                "switcher": 2,
+                "value": identity["user_agent"],
+            }
 
         body = self._post("/api/env/create/advanced", payload)
         profile_id = self._extract_created_profile_id(body)
@@ -311,6 +530,19 @@ class MoreLoginProvider(BaseBrowserProvider):
             raise ProfileStartError(
                 f"{provider} returned invalid debugPort: {raw_port!r}"
             ) from exc
+
+    def stop_profile(self, profile_id: str) -> None:
+        """Stop a running MoreLogin profile."""
+        url = f"{self._base_url}/api/env/close"
+        try:
+            requests.post(
+                url,
+                json={"envId": profile_id.strip()},
+                headers=self._headers(),
+                timeout=self._timeout,
+            )
+        except RequestException:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +724,34 @@ class MultiloginProvider(BaseBrowserProvider):
         width, height = MoreLoginProvider._parse_resolution(
             identity["screen_resolution"]
         )
+        os_type = str(identity.get("os_type") or "windows")
+        if identity.get("mobile_first"):
+            os_type = "android"
+        pixel_ratio = float(identity.get("pixel_ratio") or 1)
+
+        fingerprint: dict[str, Any] = {
+            "timezone": {"zone": identity["timezone"]},
+            "localization": {
+                "locale": identity["language"],
+                "languages": identity["language"],
+                "accept_languages": f"{identity['language']},en;q=0.9",
+            },
+            "screen": {
+                "width": width,
+                "height": height,
+                "pixel_ratio": pixel_ratio,
+            },
+        }
+
+        if identity.get("user_agent"):
+            fingerprint["navigator"] = {
+                "user_agent": identity["user_agent"],
+                "platform": identity.get("navigator_platform", "Linux armv8l"),
+                "hardware_concurrency": int(
+                    identity.get("hardware_concurrency") or 8
+                ),
+                "max_touch_points": int(identity.get("max_touch_points") or 5),
+            }
 
         parameters: dict[str, Any] = {
             "flags": {
@@ -504,26 +764,14 @@ class MultiloginProvider(BaseBrowserProvider):
                 "graphics_noise": "mask",
                 "localization_masking": "custom",
                 "media_devices_masking": "mask",
-                "navigator_masking": "mask",
+                "navigator_masking": "custom" if identity.get("user_agent") else "mask",
                 "ports_masking": "mask",
                 "screen_masking": "custom",
                 "timezone_masking": "custom",
                 "webrtc_masking": "mask",
                 "proxy_masking": "custom" if proxy and proxy.get("host") else "disabled",
             },
-            "fingerprint": {
-                "timezone": {"zone": identity["timezone"]},
-                "localization": {
-                    "locale": identity["language"],
-                    "languages": identity["language"],
-                    "accept_languages": f"{identity['language']},en;q=0.9",
-                },
-                "screen": {
-                    "width": width,
-                    "height": height,
-                    "pixel_ratio": 1,
-                },
-            },
+            "fingerprint": fingerprint,
             "storage": {
                 "is_local": True,
                 "save_service_worker": True,
@@ -543,7 +791,7 @@ class MultiloginProvider(BaseBrowserProvider):
             "name": name,
             "folder_id": self._folder_id,
             "browser_type": "mimic",
-            "os_type": "windows",
+            "os_type": os_type,
             "parameters": parameters,
         }
 
@@ -604,7 +852,10 @@ class MultiloginProvider(BaseBrowserProvider):
         )
 
     def start_profile(self, profile_id: str) -> int:
-        """Start a Multilogin profile and return its automation CDP port."""
+        """Start a Multilogin profile and return its automation CDP port.
+
+        Auto-handles PROFILE_ALREADY_RUNNING by stopping first then retrying.
+        """
         url = (
             f"{self.LAUNCHER_BASE}/api/v2/profile/f/{self._folder_id}"
             f"/p/{profile_id}/start"
@@ -614,39 +865,53 @@ class MultiloginProvider(BaseBrowserProvider):
             "Authorization": f"Bearer {self._token}",
         }
         params = {
-            # puppeteer returns a CDP-compatible port suitable for nodriver
             "automation_type": "puppeteer",
             "headless_mode": "false",
         }
 
-        try:
-            response = requests.get(
-                url,
-                headers=headers,
-                params=params,
-                timeout=self._timeout,
-            )
-            response.raise_for_status()
-            body = response.json()
-        except RequestsConnectionError as exc:
-            raise ProviderConnectionError(
-                "Could not connect to Multilogin launcher. "
-                "Ensure Multilogin X agent/desktop app is running."
-            ) from exc
-        except Timeout as exc:
-            raise ProviderConnectionError(
-                f"Multilogin API timed out after {self._timeout}s."
-            ) from exc
-        except HTTPError as exc:
-            raise ProfileStartError(
-                f"Multilogin HTTP error {response.status_code}: {response.text}"
-            ) from exc
-        except (ValueError, RequestException) as exc:
-            raise ProfileStartError(
-                f"Multilogin request failed: {exc}"
-            ) from exc
+        for attempt in range(2):
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=self._timeout,
+                )
+                response.raise_for_status()
+                body = response.json()
+                return self._extract_debug_port(body)
 
-        return self._extract_debug_port(body)
+            except RequestsConnectionError as exc:
+                raise ProviderConnectionError(
+                    "Could not connect to Multilogin launcher. "
+                    "Ensure Multilogin X agent/desktop app is running."
+                ) from exc
+            except Timeout as exc:
+                raise ProviderConnectionError(
+                    f"Multilogin API timed out after {self._timeout}s."
+                ) from exc
+            except HTTPError as exc:
+                # Auto-recover: profile already running → stop it then retry once
+                if attempt == 0 and response.status_code in (400, 500):
+                    body_text = response.text or ""
+                    if "ALREADY_RUNNING" in body_text or "LOCK_PROFILE" in body_text or "browser process is running" in body_text:
+                        import logging as _logging
+                        _logging.getLogger("mmb.browser").warning(
+                            "Profile %s already running — auto-stopping and retrying...", profile_id
+                        )
+                        self.stop_profile(profile_id)
+                        import time as _time
+                        _time.sleep(4.0)  # wait for Multilogin to release the lock
+                        continue  # retry start
+                raise ProfileStartError(
+                    f"Multilogin HTTP error {response.status_code}: {response.text}"
+                ) from exc
+            except (ValueError, RequestException) as exc:
+                raise ProfileStartError(
+                    f"Multilogin request failed: {exc}"
+                ) from exc
+
+        raise ProfileStartError(f"Profile {profile_id} could not be started after auto-stop retry.")
 
     @staticmethod
     def _extract_debug_port(body: dict[str, Any]) -> int:
@@ -671,6 +936,18 @@ class MultiloginProvider(BaseBrowserProvider):
             raise ProfileStartError(
                 f"Multilogin returned invalid port: {raw_port!r}"
             ) from exc
+
+    def stop_profile(self, profile_id: str) -> None:
+        """Stop a running Multilogin profile."""
+        url = f"{self.LAUNCHER_BASE}/api/v1/profile/stop/p/{profile_id.strip()}"
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self._token}",
+        }
+        try:
+            requests.get(url, headers=headers, timeout=self._timeout, verify=False)
+        except RequestException:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +992,7 @@ class BrowserManager:
         self._multilogin_token = os.getenv("MULTILOGIN_TOKEN", "")
         self._multilogin_folder_id = os.getenv("MULTILOGIN_FOLDER_ID", "")
         self._provider = self._build_provider(self._provider_name)
+        self._logger = logging.getLogger("mmb.browser_manager")
 
     def _build_provider(self, provider_name: str) -> BaseBrowserProvider:
         if provider_name not in self.SUPPORTED_PROVIDERS:
@@ -773,6 +1051,14 @@ class BrowserManager:
 
         return self._provider.start_profile(profile_id.strip())
 
+    def stop_profile(self, profile_id: str) -> None:
+        """Stop a running browser profile via the active provider."""
+        if not profile_id or not profile_id.strip():
+            return
+        stop_fn = getattr(self._provider, "stop_profile", None)
+        if callable(stop_fn):
+            stop_fn(profile_id.strip())
+
     def create_profile(
         self,
         identity: dict[str, Any],
@@ -819,12 +1105,24 @@ class BrowserManager:
         }
         return provider.validate_proxy(clean)
 
-    async def get_browser_instance(self, profile_id: str) -> Browser:
+    async def get_browser_instance(
+        self,
+        profile_id: str,
+        identity: Optional[dict[str, Any]] = None,
+        *,
+        apply_viewport: bool = False,
+    ) -> Browser:
         """
         Start a profile and connect nodriver to its CDP debug port.
 
+        Applies a mandatory post-start cooldown before CDP attach. Viewport
+        enforcement is optional here — prefer ``apply_viewport_to_tab`` after
+        the session tab is stable (YouTubeManager.open_session).
+
         Args:
             profile_id: Provider-specific profile identifier.
+            identity: Optional IdentityManager payload for viewport mapping.
+            apply_viewport: When True, apply viewport immediately after connect.
 
         Returns:
             Connected nodriver ``Browser`` instance.
@@ -833,5 +1131,98 @@ class BrowserManager:
             ProviderConnectionError: Provider API unreachable.
             ProfileStartError: Profile failed to start.
         """
-        debug_port = self.start_profile(profile_id)
-        return await uc.start(host=self._cdp_host, port=debug_port)
+        profile_id = profile_id.strip()
+        is_android = _is_mobile_identity(identity or {})
+
+        async with profile_session_lock(profile_id):
+            # Run blocking HTTP call in thread pool so event loop stays unblocked
+            loop = asyncio.get_event_loop()
+            debug_port = await loop.run_in_executor(None, self.start_profile, profile_id)
+            self._logger.info(
+                "Profile started | id=%s port=%s cooldown=%ss android=%s",
+                profile_id,
+                debug_port,
+                CDP_CONNECT_COOLDOWN_SECONDS,
+                is_android,
+            )
+            await asyncio.sleep(CDP_CONNECT_COOLDOWN_SECONDS)
+
+            # Android: mandatory 10s settle — no interactions until TCP stack ready
+            if is_android:
+                self._logger.info(
+                    "Android profile detected — 10s stability settle (no CDP touch)"
+                )
+                await asyncio.sleep(10.0)
+
+            # Android: retry with 15s gap on ConnectionClosedError
+            for _attempt in range(2):
+                try:
+                    browser = await uc.start(host=self._cdp_host, port=debug_port)
+                    break
+                except Exception as exc:
+                    exc_name = type(exc).__name__
+                    if is_android and _attempt == 0 and (
+                        "ConnectionClosed" in exc_name or "ConnectionReset" in exc_name
+                        or "ConnectionError" in exc_name or "closed" in str(exc).lower()
+                    ):
+                        self._logger.warning(
+                            "Android CDP ConnectionClosed on first attempt — 15s TCP recovery wait | %s",
+                            exc,
+                        )
+                        await asyncio.sleep(15.0)
+                        continue
+                    raise
+            else:
+                raise ProfileStartError(
+                    f"Android CDP connect failed after retry for profile {profile_id}"
+                )
+
+            await asyncio.sleep(1.0)
+
+            if apply_viewport and identity and not is_android:
+                # Android: skip viewport at this stage — apply only after settle
+                tab = browser.main_tab
+                if tab is None:
+                    tab = await browser.get("about:blank")
+                await apply_adaptive_viewport(tab, identity, self._logger)
+
+            return browser
+
+    async def prepare_session_tab(
+        self,
+        browser: Browser,
+        identity: dict[str, Any],
+    ) -> Tab:
+        """
+        Apply adaptive viewport to the main tab **before** any navigation.
+
+        Stability-first: ensures CDP device metrics match the profile OS/resolution
+        while the tab is still on its startup page (e.g. chrome://newtab/).
+        """
+        tab = browser.main_tab
+        if tab is None:
+            raise BrowserProviderError("Browser connected but no main tab is available.")
+
+        start_url = ""
+        try:
+            start_url = tab.url or ""
+        except Exception:
+            pass
+
+        profile = await self.apply_viewport_to_tab(tab, identity)
+        self._logger.info(
+            "Viewport applied before navigation | %sx%s %s | start_url=%s",
+            profile.width,
+            profile.height,
+            profile.os_label,
+            start_url or "unknown",
+        )
+        return tab
+
+    async def apply_viewport_to_tab(
+        self,
+        tab: Tab,
+        identity: dict[str, Any],
+    ) -> ViewportProfile:
+        """Apply adaptive viewport to an existing tab (idempotent helper)."""
+        return await apply_adaptive_viewport(tab, identity, self._logger)

@@ -103,6 +103,8 @@ class ProfileFactory:
         provider: str = "morelogin",
         proxy: Optional[ProxyConfig] = None,
         profile_name: Optional[str] = None,
+        mobile_first: bool = True,
+        mobile_platform: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Create a fully configured anti-detection browser profile.
@@ -113,6 +115,8 @@ class ProfileFactory:
             proxy: Optional proxy dict with ``host``, ``port``, ``user``,
                 ``password``, and ``type`` (``http`` / ``socks5``).
             profile_name: Optional custom profile name.
+            mobile_first: When True, configure Android/iOS mobile fingerprint.
+            mobile_platform: Force ``android`` or ``ios`` (optional).
 
         Returns:
             Dictionary with ``profile_id``, ``provider``, ``country_code``,
@@ -153,6 +157,19 @@ class ProfileFactory:
 
             proxy_ip = self._resolve_proxy_exit_ip(resolved_proxy)
             identity = self._build_synced_identity(proxy_ip, country, resolved_proxy)
+
+            if mobile_first:
+                identity = self._identity_manager.apply_mobile_fingerprint(
+                    identity,
+                    platform=mobile_platform,
+                    provider=provider_name,
+                )
+                self._logger.info(
+                    "Mobile fingerprint applied | platform=%s os_type=%s ua=%s...",
+                    identity.get("device_platform"),
+                    identity.get("os_type"),
+                    str(identity.get("user_agent", ""))[:48],
+                )
 
             self._logger.info(
                 "Step A: identity synced | ip=%s tz=%s city=%s source=%s screen=%s",

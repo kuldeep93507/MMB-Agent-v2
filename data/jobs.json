@@ -1,0 +1,52 @@
+{
+  "cycle_hours": 24,
+  "country_code": "US",
+  "provider": "multilogin",
+  "mobile_first": false,
+  "timezone": "America/New_York",
+  "daily_profile_view_limit": 5,
+  "max_concurrent_profiles": 3,
+  "min_concurrent_profiles": 1,
+  "ram_per_profile_mb": 1200,
+  "min_inter_arrival_seconds": 60,
+  "max_inter_arrival_seconds": 300,
+  "auto_create_profiles": false,
+  "target_profile_pool_size": 10,
+  "perform_engagement": true,
+  "like_probability": 0.35,
+  "subscribe_probability": 0.08,
+  "profiles": [
+    {
+      "profile_id": "c58a40dc-d6ff-4234-8d26-a592804d32ea",
+      "country_code": "US",
+      "provider": "multilogin",
+      "platform": "windows"
+    },
+    {
+      "profile_id": "fe1a3ea6-a7bf-4dbb-9d9f-f1cb14abdc56",
+      "country_code": "US",
+      "provider": "multilogin",
+      "platform": "macos"
+    }
+  ],
+  "jobs": [
+    {
+      "id": "finance-revenue-batch-01",
+      "video_id": "KjNyAVwtAUg",
+      "search_keywords": "best credit cards 2026",
+      "search_keyword_variants": [
+        "best credit cards 2026",
+        "how to earn 1000 dollars monthly from credit cards",
+        "best rewards credit cards usa 2026",
+        "credit card monthly income strategy",
+        "best cash back cards 2026"
+      ],
+      "title_hint": "Best Credit Card 2026",
+      "target_views": 10,
+      "perform_engagement": true,
+      "comment_text": "This is a very helpful strategy for 2026, thanks for sharing!",
+      "behavior_profile": "serious_learner",
+      "referrer_search": true
+    }
+  ]
+}

@@ -117,6 +117,36 @@ COMMON_SCREEN_RESOLUTIONS: tuple[str, ...] = (
     "1680x1050",
 )
 
+MOBILE_SCREEN_RESOLUTIONS: tuple[str, ...] = (
+    "390x844",
+    "412x915",
+    "360x800",
+    "384x854",
+    "393x873",
+    "414x896",
+    "375x812",
+)
+
+MOBILE_ANDROID_USER_AGENTS: tuple[str, ...] = (
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 13; SM-S911B) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 7 Pro) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+)
+
+MOBILE_IOS_USER_AGENTS: tuple[str, ...] = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) CriOS/124.0.6367.88 Mobile/15E148 Safari/604.1",
+)
+
 
 class GeoIPError(Exception):
     """Raised when GeoIP lookup fails."""
@@ -457,6 +487,51 @@ class IdentityManager:
             identity["profile_id"] = profile_id
 
         return identity
+
+    def apply_mobile_fingerprint(
+        self,
+        identity: dict[str, Any],
+        platform: Optional[str] = None,
+        *,
+        provider: str = "multilogin",
+    ) -> dict[str, Any]:
+        """
+        Enrich a desktop identity with mobile device traits (UA, screen, OS).
+
+        Multilogin supports ``android`` os_type; MoreLogin supports Android (3)
+        and iOS (4) via ``operator_system_id``.
+        """
+        mobile = dict(identity)
+        chosen = (platform or os.getenv("MOBILE_PLATFORM", "")).strip().lower()
+        if chosen not in {"android", "ios"}:
+            chosen = random.choice(("android", "ios"))
+
+        if provider == "multilogin" and chosen == "ios":
+            chosen = "android"
+
+        resolution = random.choice(MOBILE_SCREEN_RESOLUTIONS)
+        width_str, height_str = resolution.split("x", 1)
+        pixel_ratio = random.choice((2.0, 2.625, 3.0))
+
+        mobile["device_platform"] = chosen
+        mobile["mobile_first"] = True
+        mobile["screen_resolution"] = resolution
+        mobile["screen_width"] = int(width_str)
+        mobile["screen_height"] = int(height_str)
+        mobile["pixel_ratio"] = pixel_ratio
+        mobile["operator_system_id"] = 3 if chosen == "android" else 4
+        mobile["os_type"] = "android" if chosen == "android" else "ios"
+        mobile["user_agent"] = random.choice(
+            MOBILE_ANDROID_USER_AGENTS
+            if chosen == "android"
+            else MOBILE_IOS_USER_AGENTS
+        )
+        mobile["navigator_platform"] = (
+            "Linux armv8l" if chosen == "android" else "iPhone"
+        )
+        mobile["max_touch_points"] = random.randint(5, 10)
+        mobile["hardware_concurrency"] = random.choice((4, 6, 8))
+        return mobile
 
     @staticmethod
     def _cache_key(profile_id: str, country_code: str) -> str:
